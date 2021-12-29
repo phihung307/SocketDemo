@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Text;
+using BUS.Models;
 
 // State object for receiving data from remote device.  
 public class StateObject
@@ -31,12 +32,13 @@ public class AsynchronousClient
 
     // The response from the remote device.  
     private static String response = String.Empty;
-
+    private static bool checkLogin = false;
     private static void StartClient()
     {
         // Connect to a remote device.  
         try
         {
+
             // Establish the remote endpoint for the socket.  
             // The name of the
             // remote device is "host.contoso.com".  
@@ -51,24 +53,57 @@ public class AsynchronousClient
                 SocketType.Stream, ProtocolType.Tcp);
 
             // Connect to the remote endpoint.  
-            client.BeginConnect(remoteEP,
-                new AsyncCallback(ConnectCallback), client);
-            connectDone.WaitOne();
+            try
+            {
+                client.BeginConnect(remoteEP,
+              new AsyncCallback(ConnectCallback), client);
+                connectDone.WaitOne();
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("IP server: ");
+                IP = Console.ReadLine();
 
-            // Send test data to the remote device.  
-            Console.WriteLine("UserName: ");
-            var username = Console.ReadLine();
-            Console.WriteLine("Password: ");
-            var pass = Console.ReadLine();
-            Send(client,"login"+ "\n" + username + "\n" + pass + "<EOF>") ;
-            sendDone.WaitOne();
+                ipHostInfo = Dns.GetHostEntry(IP);
+                ipAddress = ipHostInfo.AddressList[0];
+                remoteEP = new IPEndPoint(ipAddress, port);
+                // Create a TCP/IP socket.  
+                client = new Socket(ipAddress.AddressFamily,
+                    SocketType.Stream, ProtocolType.Tcp);
+            }
+
+            while (true)
+            {
+                // Send test data to the remote device.
+                string? choose = string.Empty;
+                while (checkLogin == false)
+                {
+                    Console.WriteLine("1. Login");
+                    Console.WriteLine("2. Resgiter");
+                    choose = Console.ReadLine();
+                    if (choose == "2")
+                    {
+                        if (Register(client))
+                        {
+                            Login(client);
+                        }
+                    }
+                    else if (choose == "1")
+                    {
+                        Login(client);
+                    }
+                    else
+                    {
+                        Console.WriteLine("Enter your choose again:");
+                    }
+                }
+                
+            }
 
             // Receive the response from the remote device.  
-            Receive(client);
-            receiveDone.WaitOne();
-
             // Write the response to the console.  
-            Console.WriteLine("Response received : {0}", response);
+
+
 
             // Release the socket.  
             //client.Shutdown(SocketShutdown.Both);
@@ -79,6 +114,61 @@ public class AsynchronousClient
         {
             Console.WriteLine(e.ToString());
         }
+    }
+    private static bool Register(Socket client)
+    {
+        var user = new User();
+        Console.WriteLine("UserName: ");
+        user.UserName = Console.ReadLine();
+        Console.WriteLine("Password: ");
+        user.Password = Console.ReadLine();
+        SendRegister(client, user);
+        sendDone.WaitOne();
+        sendDone = new ManualResetEvent(false);
+        Receive(client);
+        receiveDone.WaitOne();
+        receiveDone = new ManualResetEvent(false);
+        if (response.Contains("register succes"))
+        {
+            Console.WriteLine("{0}", response);
+            response = String.Empty;
+            return true;
+        }
+        else
+        {
+            Console.WriteLine("{0}", response);
+            response = String.Empty;
+        }
+        return false;
+    }
+    private static bool Login(Socket client)
+    {
+        var user = new User();
+        Console.WriteLine("LOGIN");
+
+        Console.WriteLine("UserName: ");
+        user.UserName = Console.ReadLine();
+        Console.WriteLine("Password: ");
+        user.Password = Console.ReadLine();
+        SendLogin(client, user);
+        sendDone.WaitOne();
+        sendDone = new ManualResetEvent(false);
+        Receive(client);
+        receiveDone.WaitOne();
+        receiveDone = new ManualResetEvent(false);
+        if (response.Contains("login succes"))
+        {
+            Console.WriteLine("{0}", response);
+            response = String.Empty;
+            checkLogin = true;
+            return true;
+        }
+        else
+        {
+            Console.WriteLine("{0}", response);
+            response = String.Empty;
+        }
+        return false;
     }
 
     private static void ConnectCallback(IAsyncResult ar)
@@ -137,19 +227,21 @@ public class AsynchronousClient
             {
                 // There might be more data, so store the data received so far.  
                 state.sb.Append(Encoding.ASCII.GetString(state.buffer, 0, bytesRead));
-
-                // Get the rest of the data.  
-                client.BeginReceive(state.buffer, 0, StateObject.BufferSize, 0,
-                    new AsyncCallback(ReceiveCallback), state);
-            }
-            else
-            {
-                // All the data has arrived; put it in response.  
                 if (state.sb.Length > 1)
                 {
                     response = state.sb.ToString();
                 }
-                // Signal that all bytes have been received.  
+                receiveDone.Set();
+                //// Get the rest of the data.  
+                //client.BeginReceive(state.buffer, 0, StateObject.BufferSize, 0,
+                //    new AsyncCallback(ReceiveCallback), state);
+            }
+            else
+            {
+                if (state.sb.Length > 1)
+                {
+                    response = state.sb.ToString();
+                }
                 receiveDone.Set();
             }
         }
@@ -188,7 +280,35 @@ public class AsynchronousClient
             Console.WriteLine(e.ToString());
         }
     }
+    private static void SendLogin(Socket client, User user)
+    {
+        // Convert the string data to byte data using ASCII encoding.  
+        byte[] byteData = Encoding.ASCII.GetBytes("login" + "\n" + user.UserName + "\n" + user.Password);
 
+        // Begin sending the data to the remote device.  
+        client.BeginSend(byteData, 0, byteData.Length, 0,
+            new AsyncCallback(SendCallback), client);
+    }
+
+    private static void SendRegister(Socket client, User user)
+    {
+        // Convert the string data to byte data using ASCII encoding.  
+        byte[] byteData = Encoding.ASCII.GetBytes("register" + "\n" + user.UserName + "\n" + user.Password);
+
+        // Begin sending the data to the remote device.  
+        client.BeginSend(byteData, 0, byteData.Length, 0,
+            new AsyncCallback(SendCallback), client);
+    }
+
+    private static bool SocketConnected(Socket s)
+    {
+        bool part1 = s.Poll(1000, SelectMode.SelectRead);
+        bool part2 = (s.Available == 0);
+        if (part1 && part2)
+            return false;
+        else
+            return true;
+    }
     public static int Main(String[] args)
     {
         StartClient();

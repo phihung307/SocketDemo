@@ -1,4 +1,5 @@
-﻿using System;
+﻿using BUS.Models;
+using System;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -24,7 +25,7 @@ public class AsynchronousSocketListener
 {
     // Thread signal.  
     public static ManualResetEvent allDone = new ManualResetEvent(false);
-
+    public static List<Socket> ListConnected = new List<Socket>();
     public AsynchronousSocketListener()
     {
     }
@@ -41,26 +42,29 @@ public class AsynchronousSocketListener
         // Create a TCP/IP socket.  
         Socket listener = new Socket(ipAddress.AddressFamily,
             SocketType.Stream, ProtocolType.Tcp);
-
         // Bind the socket to the local endpoint and listen for incoming connections.  
         try
         {
-            listener.Bind(localEndPoint);
-            listener.Listen(100);
-
             while (true)
             {
-                // Set the event to nonsignaled state.  
-                allDone.Reset();
+                listener.Bind(localEndPoint);
+                listener.Listen(100);
 
-                // Start an asynchronous socket to listen for connections.  
-                Console.WriteLine("Waiting for a connection...");
-                listener.BeginAccept(
-                    new AsyncCallback(AcceptCallback),
-                    listener);
+                while (true)
+                {
+                    // Set the event to nonsignaled state.  
+                    allDone.Reset();
 
-                // Wait until a connection is made before continuing.  
-                allDone.WaitOne();
+                    // Start an asynchronous socket to listen for connections.  
+                    Console.WriteLine("Waiting for a connection...");
+
+                    listener.BeginAccept(
+                        new AsyncCallback(AcceptCallback),
+                        listener);
+
+                    // Wait until a connection is made before continuing.  
+                    allDone.WaitOne();
+                }
             }
 
         }
@@ -82,12 +86,22 @@ public class AsynchronousSocketListener
         // Get the socket that handles the client request.  
         Socket listener = (Socket)ar.AsyncState;
         Socket handler = listener.EndAccept(ar);
-
-        // Create the state object.  
-        StateObject state = new StateObject();
-        state.workSocket = handler;
-        handler.BeginReceive(state.buffer, 0, StateObject.BufferSize, 0,
-            new AsyncCallback(ReadCallback), state);
+        ListConnected.Add(handler);
+        // Create the state object.          
+        Console.WriteLine(handler.RemoteEndPoint?.ToString() + " is connected. Total:" + ListConnected.Count());
+        Thread listen = new Thread(() =>
+        {
+            while (true)
+            {
+                StateObject state = new StateObject();
+                state.workSocket = handler;
+                handler.BeginReceive(state.buffer, 0, StateObject.BufferSize, 0,
+new AsyncCallback(ReadCallback), state);      
+            }
+        });
+        listen.IsBackground = true;
+        listen.Start();
+      
     }
 
     public static void ReadCallback(IAsyncResult ar)
@@ -100,6 +114,10 @@ public class AsynchronousSocketListener
         Socket handler = state.workSocket;
 
         // Read data from the client socket.
+       if (!SocketConnected(handler))
+        {
+            return;
+        }
         int bytesRead = handler.EndReceive(ar);
 
         if (bytesRead > 0)
@@ -113,26 +131,46 @@ public class AsynchronousSocketListener
             content = state.sb.ToString();
             if (content.IndexOf("<EOF>") > -1)
             {
-                // All the data has been read from the
-                // client. Display it on the console.  
-                Console.WriteLine("Read {0} bytes from socket. \n Data : {1}",
-                    content.Length, content);
-                if (content.Contains("login"))
-                {
-                    Send(handler, "Login success");
-                }
-                else
-                {
-                    // Echo the data back to the client.  
-                    Send(handler, content);
-                }
-
+                Send(handler, "You Out");
+                handler.Shutdown(SocketShutdown.Both);
+                handler.Close();
             }
             else
             {
                 // Not all data received. Get more.  
-                handler.BeginReceive(state.buffer, 0, StateObject.BufferSize, 0,
-                new AsyncCallback(ReadCallback), state);
+                //handler.BeginReceive(state.buffer, 0, StateObject.BufferSize, 0,
+                //new AsyncCallback(ReadCallback), state);
+                var c = content.Split();
+                if (c?.Count() > 0)
+                {
+                    switch (c[0].ToLower())
+                    {
+                        case "login":
+
+                            if (Login(new User { UserName = c[1], Password = c[2] }))
+                            {
+                                Send(handler, "login success");
+                            }
+                            else
+                            {
+                                Send(handler, "login fail");
+                            }
+                            break;
+                        case "register":
+                            if (Register(new User { UserName = c[1], Password = c[2] }))
+                            {
+                                Send(handler, "register success");
+                            }
+                            else
+                            {
+                                Send(handler, "register fail");
+                            }
+                            break;
+                        default:
+                            break;
+                    }
+                }
+              
             }
         }
     }
@@ -143,8 +181,19 @@ public class AsynchronousSocketListener
         byte[] byteData = Encoding.ASCII.GetBytes(data);
 
         // Begin sending the data to the remote device.  
-        handler.BeginSend(byteData, 0, byteData.Length, 0,
+        Console.WriteLine("Send data to:" + handler?.RemoteEndPoint?.ToString());
+        handler?.BeginSend(byteData, 0, byteData.Length, 0,
             new AsyncCallback(SendCallback), handler);
+    }
+
+    private static bool SocketConnected(Socket s)
+    {
+        bool part1 = s.Poll(1000, SelectMode.SelectRead);
+        bool part2 = (s.Available == 0);
+        if (part1 && part2)
+            return false;
+        else
+            return true;
     }
 
     private static void SendCallback(IAsyncResult ar)
@@ -158,8 +207,8 @@ public class AsynchronousSocketListener
             int bytesSent = handler.EndSend(ar);
             Console.WriteLine("Sent {0} bytes to client.", bytesSent);
 
-            handler.Shutdown(SocketShutdown.Both);
-            handler.Close();
+            //handler.Shutdown(SocketShutdown.Both);
+            //handler.Close();
 
         }
         catch (Exception e)
@@ -167,7 +216,52 @@ public class AsynchronousSocketListener
             Console.WriteLine(e.ToString());
         }
     }
+    public static bool Register(User user)
+    {
+        try
+        {
+            using (var db = new SocketContext())
+            {
+                var u = db.Users.FirstOrDefault(x => x.UserName == user.UserName);
+                if (u != null)
+                {
+                    return false;
+                }
+                db.Users.Add(user);
+                if (db.SaveChanges() > 0)
+                {
+                    return true;
+                };
+            }
+        }
+        catch (Exception)
+        {
 
+            throw;
+        }
+        return false;
+    }
+
+    public static bool Login(User user)
+    {
+        try
+        {
+            using (var db = new SocketContext())
+            {
+                var u = db.Users.FirstOrDefault(x => x.UserName == user.UserName && x.Password == user.Password);
+                if (u != null)
+                {
+                    return true;
+                }
+            }
+        }
+        catch (Exception)
+        {
+
+            throw;
+        }
+        return false;
+    }
     public static int Main(String[] args)
     {
         StartListening();
