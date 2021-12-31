@@ -1,6 +1,9 @@
 ﻿using BUS.Models;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -26,6 +29,7 @@ public class AsynchronousSocketListener
     // Thread signal.  
     public static ManualResetEvent allDone = new ManualResetEvent(false);
     public static List<Socket> ListConnected = new List<Socket>();
+    public static string bearerToken = string.Empty;
     public AsynchronousSocketListener()
     {
     }
@@ -75,6 +79,7 @@ public class AsynchronousSocketListener
 
         Console.WriteLine("\nPress ENTER to continue...");
         Console.Read();
+        StartListening();
 
     }
 
@@ -91,13 +96,27 @@ public class AsynchronousSocketListener
         Console.WriteLine(handler.RemoteEndPoint?.ToString() + " is connected. Total:" + ListConnected.Count());
         Thread listen = new Thread(() =>
         {
-            while (true)
+            try
             {
-                StateObject state = new StateObject();
-                state.workSocket = handler;
-                handler.BeginReceive(state.buffer, 0, StateObject.BufferSize, 0,
-new AsyncCallback(ReadCallback), state);      
+                while (true)
+                {
+                    StateObject state = new StateObject();
+                    state.workSocket = handler;
+                    handler.BeginReceive(state.buffer, 0, StateObject.BufferSize, 0,
+    new AsyncCallback(ReadCallback), state);
+                }
             }
+            catch (Exception)
+            {
+                while (true)
+                {
+                    StateObject state = new StateObject();
+                    state.workSocket = handler;
+                    handler.BeginReceive(state.buffer, 0, StateObject.BufferSize, 0,
+    new AsyncCallback(ReadCallback), state);
+                }
+            }
+            
         });
         listen.IsBackground = true;
         listen.Start();
@@ -131,9 +150,7 @@ new AsyncCallback(ReadCallback), state);
             content = state.sb.ToString();
             if (content.IndexOf("<EOF>") > -1)
             {
-                Send(handler, "You Out");
-                handler.Shutdown(SocketShutdown.Both);
-                handler.Close();
+                Send(handler, "Log out success");
             }
             else
             {
@@ -163,7 +180,19 @@ new AsyncCallback(ReadCallback), state);
                             }
                             else
                             {
-                                Send(handler, "register fail");
+                                Send(handler, "register fail, please register another user");
+                            }
+                            break;
+                        case "getcurrency":
+                            var currency = GetCurrency(c[1],DateTime.Parse(c[2]));
+                            if (currency != null)
+                            {
+                                string response =String.Format("{0} Buy:{1} Sell: {2}", currency.Currency,currency.Buy, currency.Sell);
+                                Send(handler, response);
+                            }
+                            else
+                            {
+                                Send(handler, "Currency wrong or date not have data");
                             }
                             break;
                         default:
@@ -188,12 +217,19 @@ new AsyncCallback(ReadCallback), state);
 
     private static bool SocketConnected(Socket s)
     {
-        bool part1 = s.Poll(1000, SelectMode.SelectRead);
-        bool part2 = (s.Available == 0);
-        if (part1 && part2)
+        try
+        {
+            bool part1 = s.Poll(1000, SelectMode.SelectRead);
+            bool part2 = (s.Available == 0);
+            if (part1 && part2)
+                return false;
+            else
+                return true;
+        }
+        catch (Exception){
             return false;
-        else
-            return true;
+        }
+        
     }
 
     private static void SendCallback(IAsyncResult ar)
@@ -262,8 +298,129 @@ new AsyncCallback(ReadCallback), state);
         }
         return false;
     }
+
+    public static CurrencyPrice GetCurrency(string name, DateTime date)
+    {
+        try
+        {
+            using (var db = new SocketContext())
+            {
+                var currencyPrice = db.CurrencyPrices.FirstOrDefault(x => x.Currency == name && x.CreatedDate.Value.Date == date);
+                if (currencyPrice != null)
+                {
+                    return currencyPrice;
+                }
+            }
+        }
+        catch (Exception)
+        {
+
+            throw;
+        }
+        return null;
+    }
+    public static void GetData()
+    {
+        if (string.IsNullOrEmpty(bearerToken))
+        {
+            bearerToken = GetAccessToken();
+        }
+        const string url = "https://vapi.vnappmob.com/api/v2/exchange_rate/sbv";
+        HttpClient client = new HttpClient();
+        client.BaseAddress = new Uri(url);
+        client.DefaultRequestHeaders.Accept.Clear();
+        client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", bearerToken);
+        var responseMessage = client.GetAsync(url).Result;
+        if (responseMessage.IsSuccessStatusCode)
+        {
+            var data = responseMessage.Content.ReadAsStringAsync().Result;
+
+            var responseJOject = JsonConvert.DeserializeObject<JObject>(data);
+            var result = responseJOject["results"];
+            var dataCurrency = JsonConvert.DeserializeObject<List<CurrencyPrice>>(result.ToString());
+            foreach (var item in dataCurrency)
+            {
+                item.CreatedDate = DateTime.Now.Date;
+            }
+            using (var db = new SocketContext())
+            {
+                var currencys = db.CurrencyPrices.Where(x =>x.CreatedDate.Value.Date == DateTime.Now.Date && dataCurrency.Select(y=>y.Currency).Contains(x.Currency)).ToList();
+                if (!currencys.Any())
+                {
+                    db.CurrencyPrices.AddRange(dataCurrency);
+                }
+                else
+                {
+                    db.CurrencyPrices.RemoveRange(currencys);
+                    db.CurrencyPrices.AddRange(dataCurrency);
+                }
+                db.SaveChanges();
+            }
+        }
+        else
+        {
+            if (responseMessage.StatusCode == HttpStatusCode.Unauthorized
+                || responseMessage.StatusCode == HttpStatusCode.Forbidden)
+            {
+                bearerToken = string.Empty;
+                GetData();
+            }
+        }
+
+    }
+    public static string GetAccessToken()
+    {
+        var token = string.Empty;
+        try
+        {
+            using (var client = new HttpClient())
+            {
+                var responseMessage = client.GetAsync("https://vapi.vnappmob.com/api/request_api_key?scope=exchange_rate").Result;
+                if (responseMessage.IsSuccessStatusCode)
+                {
+                    var data = responseMessage.Content.ReadAsStringAsync().Result;
+                    var responseJOject = JsonConvert.DeserializeObject<JObject>(data);
+                    token = (string)responseJOject["results"];
+                }
+            }
+        }
+        catch (Exception)
+        {
+        }
+        return token;
+    }
+
+    public static void CheckLogout()
+    {
+        while(true)
+        {
+            if (ListConnected.Any())
+            {
+                for (int i = 0; i < ListConnected.Count; i++)            
+                {
+                    if (ListConnected[i]!= null && !SocketConnected(ListConnected[i]))
+                    {
+                        Console.WriteLine("{0} disconnect ", ListConnected[i].RemoteEndPoint);
+                        ListConnected.Remove(ListConnected[i]);                      
+                    }
+                }
+            }
+           
+        }
+    }
     public static int Main(String[] args)
     {
+        var startTimeSpan = TimeSpan.Zero;
+        var periodTimeSpan = TimeSpan.FromMinutes(30);
+
+        var timer = new System.Threading.Timer((e) =>
+        {
+            GetData();
+        }, null, startTimeSpan, periodTimeSpan);
+        var checkconnect = new Thread(CheckLogout);
+        checkconnect.IsBackground = true;
+        checkconnect.Start();
         StartListening();
         return 0;
     }

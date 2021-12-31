@@ -16,6 +16,7 @@ namespace BUS.Models
         {
         }
 
+        public virtual DbSet<CurrencyPrice> CurrencyPrices { get; set; } = null!;
         public virtual DbSet<User> Users { get; set; } = null!;
 
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
@@ -29,11 +30,26 @@ namespace BUS.Models
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
+            modelBuilder.Entity<CurrencyPrice>(entity =>
+            {
+                entity.ToTable("CurrencyPrice");
+                entity.Property(e => e.Id).ValueGeneratedOnAdd();
+
+                entity.Property(e => e.Buy).HasColumnType("decimal(18, 0)");
+
+                entity.Property(e => e.Currency)
+                    .HasMaxLength(10)
+                    .IsUnicode(false);
+
+                entity.Property(e => e.Sell).HasColumnType("decimal(18, 0)");
+                entity.Property(e => e.CreatedDate).HasColumnType("datetime");
+            });
+
             modelBuilder.Entity<User>(entity =>
             {
                 entity.ToTable("User");
 
-                entity.Property(e => e.Id).ValueGeneratedNever();
+                entity.Property(e => e.Id).ValueGeneratedOnAdd();
 
                 entity.Property(e => e.Password)
                     .HasMaxLength(50)

@@ -38,7 +38,6 @@ public class AsynchronousClient
         // Connect to a remote device.  
         try
         {
-
             // Establish the remote endpoint for the socket.  
             // The name of the
             // remote device is "host.contoso.com".  
@@ -53,28 +52,12 @@ public class AsynchronousClient
                 SocketType.Stream, ProtocolType.Tcp);
 
             // Connect to the remote endpoint.  
-            try
-            {
-                client.BeginConnect(remoteEP,
-              new AsyncCallback(ConnectCallback), client);
-                connectDone.WaitOne();
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine("IP server: ");
-                IP = Console.ReadLine();
-
-                ipHostInfo = Dns.GetHostEntry(IP);
-                ipAddress = ipHostInfo.AddressList[0];
-                remoteEP = new IPEndPoint(ipAddress, port);
-                // Create a TCP/IP socket.  
-                client = new Socket(ipAddress.AddressFamily,
-                    SocketType.Stream, ProtocolType.Tcp);
-            }
+            client.BeginConnect(remoteEP,
+          new AsyncCallback(ConnectCallback), client);
+            connectDone.WaitOne();
 
             while (true)
             {
-                // Send test data to the remote device.
                 string? choose = string.Empty;
                 while (checkLogin == false)
                 {
@@ -85,19 +68,25 @@ public class AsynchronousClient
                     {
                         if (Register(client))
                         {
-                            Login(client);
+                            if (Login(client))
+                            {
+                                GetDataMoney(client);
+                            };
                         }
                     }
                     else if (choose == "1")
                     {
-                        Login(client);
+                        if (Login(client))
+                        {
+                            GetDataMoney(client);
+                        };
                     }
                     else
                     {
                         Console.WriteLine("Enter your choose again:");
                     }
                 }
-                
+
             }
 
             // Receive the response from the remote device.  
@@ -112,7 +101,8 @@ public class AsynchronousClient
         }
         catch (Exception e)
         {
-            Console.WriteLine(e.ToString());
+            StartClient();
+            Console.WriteLine(e.Message);
         }
     }
     private static bool Register(Socket client)
@@ -169,6 +159,49 @@ public class AsynchronousClient
             response = String.Empty;
         }
         return false;
+    }
+
+    private static void GetDataMoney(Socket client)
+    {
+        while (checkLogin)
+        {
+            var user = new User();
+            Console.WriteLine("\n CURRENCY PRICE TO VND");
+            Console.WriteLine(" -- Enter 'Out' to logout or \nEnter currency: AUD or CAD or CHF or EUR or GBP or JPY or USD to get currency price");
+            var currency = Console.ReadLine();
+            if (currency?.ToLower() == "out")
+            {
+                SendOut(client);
+                sendDone.WaitOne();
+                sendDone = new ManualResetEvent(false);
+                Receive(client);
+                receiveDone.WaitOne();
+                receiveDone = new ManualResetEvent(false);
+                Console.WriteLine("{0}", response);
+                // Release the socket.  
+                client.Shutdown(SocketShutdown.Both);
+                client.Close();
+                checkLogin = false;
+                Environment.Exit(0);
+            }
+            Console.WriteLine("Enter day (example: 12/31/2021): ");
+            var day = Console.ReadLine();
+            DateTime date;
+            while (!DateTime.TryParse(day, out date))
+            {
+                Console.WriteLine("Wrong date please try again. Enter day (example: 12/31/2021): ");
+                day = Console.ReadLine();
+            }
+
+            SendGetCurrency(client, currency ?? string.Empty, date);
+            sendDone.WaitOne();
+            sendDone = new ManualResetEvent(false);
+            Receive(client);
+            receiveDone.WaitOne();
+            receiveDone = new ManualResetEvent(false);
+            Console.WriteLine("{0}", response);
+            response = String.Empty;
+        }
     }
 
     private static void ConnectCallback(IAsyncResult ar)
@@ -270,7 +303,7 @@ public class AsynchronousClient
 
             // Complete sending the data to the remote device.  
             int bytesSent = client.EndSend(ar);
-            Console.WriteLine("Sent {0} bytes to server.", bytesSent);
+            Console.WriteLine("Sent {0} bytes to server. Waiting!!!", bytesSent);
 
             // Signal that all bytes have been sent.  
             sendDone.Set();
@@ -300,6 +333,26 @@ public class AsynchronousClient
             new AsyncCallback(SendCallback), client);
     }
 
+    private static void SendGetCurrency(Socket client, string currency, DateTime date)
+    {
+        // Convert the string data to byte data using ASCII encoding.  
+        byte[] byteData = Encoding.ASCII.GetBytes("getcurrency" + "\n" + currency + "\n" + date);
+
+        // Begin sending the data to the remote device.  
+        client.BeginSend(byteData, 0, byteData.Length, 0,
+            new AsyncCallback(SendCallback), client);
+    }
+
+    private static void SendOut(Socket client)
+    {
+        // Convert the string data to byte data using ASCII encoding.  
+        byte[] byteData = Encoding.ASCII.GetBytes("Out <EOF>");
+
+        // Begin sending the data to the remote device.  
+        client.BeginSend(byteData, 0, byteData.Length, 0,
+            new AsyncCallback(SendCallback), client);
+    }
+
     private static bool SocketConnected(Socket s)
     {
         bool part1 = s.Poll(1000, SelectMode.SelectRead);
@@ -309,6 +362,7 @@ public class AsynchronousClient
         else
             return true;
     }
+
     public static int Main(String[] args)
     {
         StartClient();
